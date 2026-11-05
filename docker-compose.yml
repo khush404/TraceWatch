@@ -1,0 +1,251 @@
+networks:
+  tracewatch-net:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  jaeger-data:
+
+services:
+  # ═══════════════════════════════════════════
+  # INFRASTRUCTURE SERVICES
+  # ═══════════════════════════════════════════
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: tracewatch-jaeger
+    restart: unless-stopped
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - SPAN_STORAGE_TYPE=memory
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14268:14268"   # HTTP collector
+      - "4317:4317"     # OTLP gRPC (Jaeger native)
+      - "4318:4318"     # OTLP HTTP (Jaeger native)
+    networks:
+      - tracewatch-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:16686"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: tracewatch-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4319:4317"     # OTLP gRPC receiver (exposed to host)
+      - "4320:4318"     # OTLP HTTP receiver (exposed to host)
+      - "8889:8889"     # Prometheus metrics exporter
+      - "13133:13133"   # Health check
+      - "55679:55679"   # zPages
+    networks:
+      - tracewatch-net
+    depends_on:
+      - jaeger
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: tracewatch-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+      - "--web.enable-lifecycle"
+      - "--storage.tsdb.retention.time=15d"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - tracewatch-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: tracewatch-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=tracewatch123
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    networks:
+      - tracewatch-net
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  # ═══════════════════════════════════════════
+  # MICROSERVICES
+  # ═══════════════════════════════════════════
+
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    container_name: tracewatch-auth-service
+    restart: unless-stopped
+    environment:
+      - SECRET_KEY=tracewatch-jwt-secret-key-2024-very-secure
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=auth-service
+    ports:
+      - "8001:8001"
+    networks:
+      - tracewatch-net
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  order-service:
+    build:
+      context: ./services/order-service
+      dockerfile: Dockerfile
+    container_name: tracewatch-order-service
+    restart: unless-stopped
+    environment:
+      - PAYMENT_SERVICE_URL=http://payment-service:8003
+      - NOTIFICATION_SERVICE_URL=http://notification-service:8004
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=order-service
+    ports:
+      - "8002:8002"
+    networks:
+      - tracewatch-net
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: tracewatch-payment-service
+    restart: unless-stopped
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=payment-service
+      - PAYMENT_FAILURE_RATE=0.0
+    ports:
+      - "8003:8003"
+    networks:
+      - tracewatch-net
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: tracewatch-notification-service
+    restart: unless-stopped
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=notification-service
+    ports:
+      - "8004:8004"
+    networks:
+      - tracewatch-net
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    container_name: tracewatch-api-gateway
+    restart: unless-stopped
+    environment:
+      - AUTH_SERVICE_URL=http://auth-service:8001
+      - ORDER_SERVICE_URL=http://order-service:8002
+      - PAYMENT_SERVICE_URL=http://payment-service:8003
+      - NOTIFICATION_SERVICE_URL=http://notification-service:8004
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=api-gateway
+    ports:
+      - "8000:8000"
+    networks:
+      - tracewatch-net
+    depends_on:
+      - auth-service
+      - order-service
+      - payment-service
+      - notification-service
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ═══════════════════════════════════════════
+  # FRONTEND
+  # ═══════════════════════════════════════════
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: tracewatch-frontend
+    restart: unless-stopped
+    environment:
+      - VITE_API_GATEWAY_URL=http://localhost:8000
+      - VITE_JAEGER_URL=http://localhost:16686
+      - VITE_PROMETHEUS_URL=http://localhost:9090
+      - VITE_GRAFANA_URL=http://localhost:3001
+    ports:
+      - "3000:80"
+    networks:
+      - tracewatch-net
+    depends_on:
+      - api-gateway

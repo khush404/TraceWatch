@@ -1,0 +1,11 @@
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+!.env.example
+
+# Dependencies
+node_modules/
+dist/
+.vite/
