@@ -43,6 +43,7 @@ services:
     ports:
       - "4319:4317"     # OTLP gRPC receiver (exposed to host)
       - "4320:4318"     # OTLP HTTP receiver (exposed to host)
+      - "8888:8888"     # Collector internal metrics
       - "8889:8889"     # Prometheus metrics exporter
       - "13133:13133"   # Health check
       - "55679:55679"   # zPages

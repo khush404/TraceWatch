@@ -20,6 +20,7 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.propagate import inject, extract
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry import propagate
+from opentelemetry.trace import format_trace_id
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -170,14 +171,39 @@ async def send_notification(request: Request):
         response = await proxy_request("POST", f"{NOTIFICATION_SERVICE_URL}/notifications/send", "notification-service", json=body)
         return Response(content=response.content, status_code=response.status_code, media_type="application/json")
 
+@app.post("/api/payments/simulate/failure")
+async def payment_simulate_failure(request: Request):
+    body = await request.json()
+    response = await proxy_request("POST", f"{PAYMENT_SERVICE_URL}/simulate/failure", "payment-service", json=body)
+    return Response(content=response.content, status_code=response.status_code, media_type="application/json")
+
+@app.post("/api/notifications/simulate/failure")
+async def notification_simulate_failure(request: Request):
+    body = await request.json()
+    response = await proxy_request("POST", f"{NOTIFICATION_SERVICE_URL}/simulate/failure", "notification-service", json=body)
+    return Response(content=response.content, status_code=response.status_code, media_type="application/json")
+
+@app.post("/api/payments/simulate/failure")
+async def payment_simulate_failure(request: Request):
+    body = await request.json()
+    response = await proxy_request("POST", f"{PAYMENT_SERVICE_URL}/simulate/failure", "payment-service", json=body)
+    return Response(content=response.content, status_code=response.status_code, media_type="application/json")
+
+@app.post("/api/notifications/simulate/failure")
+async def notification_simulate_failure(request: Request):
+    body = await request.json()
+    response = await proxy_request("POST", f"{NOTIFICATION_SERVICE_URL}/simulate/failure", "notification-service", json=body)
+    return Response(content=response.content, status_code=response.status_code, media_type="application/json")
+
 @app.post("/api/simulate/order-flow")
 async def simulate_order_flow(request: Request):
     """Simulate a full order flow through all services for demonstration."""
     with tracer.start_as_current_span("api-gateway.simulate.order-flow") as span:
         body = await request.json()
-        results = {}
-        
-        # 1. Create order
+        trace_id = format_trace_id(span.get_span_context().trace_id)
+        span.set_attribute("simulation.user_id", body.get("user_id", "demo"))
+
+        # Create order (order-service internally calls payment + notification)
         try:
             order_resp = await proxy_request("POST", f"{ORDER_SERVICE_URL}/orders", "order-service", json={
                 "user_id": body.get("user_id", "user-123"),
@@ -185,35 +211,18 @@ async def simulate_order_flow(request: Request):
                 "total": body.get("total", 29.99)
             })
             order_data = order_resp.json()
-            results["order"] = order_data
-            span.set_attribute("order.id", order_data.get("order_id", "unknown"))
-        except Exception as e:
-            results["order"] = {"error": str(e)}
-        
-        # 2. Process payment
-        try:
-            pay_resp = await proxy_request("POST", f"{PAYMENT_SERVICE_URL}/payments/process", "payment-service", json={
-                "order_id": results.get("order", {}).get("order_id", "unknown"),
-                "amount": body.get("total", 29.99),
-                "simulate_failure": body.get("simulate_payment_failure", False)
+            return JSONResponse(content={
+                "flow": "complete",
+                "trace_id": trace_id,
+                "jaeger_url": f"http://localhost:16686/trace/{trace_id}",
+                "results": {"order": order_data}
             })
-            results["payment"] = pay_resp.json()
-        except Exception as e:
-            results["payment"] = {"error": str(e)}
-        
-        # 3. Send notification
-        try:
-            notif_resp = await proxy_request("POST", f"{NOTIFICATION_SERVICE_URL}/notifications/send", "notification-service", json={
-                "user_id": body.get("user_id", "user-123"),
-                "message": f"Order {results.get('order', {}).get('order_id', 'unknown')} confirmed",
-                "type": "email",
-                "simulate_failure": body.get("simulate_notification_failure", False)
-            })
-            results["notification"] = notif_resp.json()
-        except Exception as e:
-            results["notification"] = {"error": str(e)}
-        
-        return JSONResponse(content={"flow": "complete", "results": results})
+        except HTTPException as e:
+            detail = e.detail if isinstance(e.detail, dict) else {"error": str(e.detail)}
+            detail["trace_id"] = trace_id
+            detail["jaeger_url"] = f"http://localhost:16686/trace/{trace_id}"
+            span.set_status(trace.StatusCode.ERROR, str(e.detail))
+            raise HTTPException(status_code=e.status_code, detail=detail)
 
 @app.get("/api/services/health")
 async def all_services_health():

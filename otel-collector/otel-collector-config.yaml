@@ -7,13 +7,84 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
-  batch:
-    timeout: 1s
-    send_batch_size: 1024
   memory_limiter:
     check_interval: 1s
     limit_mib: 512
     spike_limit_mib: 128
+
+  tail_sampling:
+    decision_wait: 3s
+    num_traces: 10000
+    expected_new_traces_per_sec: 2000
+    decision_cache:
+      sampled_cache_size: 10000
+    policies:
+      # ── Policy 1: Error-Based Sampling ─────────────────────────────────────
+      # Retain 100% of traces containing span status ERROR
+      - name: error-status-filter
+        type: status_code
+        status_code:
+          status_codes:
+            - ERROR
+
+      # Retain 100% of traces containing HTTP 5xx status codes
+      - name: http-5xx-filter
+        type: numeric_attribute
+        numeric_attribute:
+          key: http.status_code
+          min_value: 500
+          max_value: 599
+
+      # ── Policy 2: Latency-Based Sampling ────────────────────────────────────
+      # Retain 100% of traces with total trace latency > 1000ms (1.0s)
+      - name: latency-filter
+        type: latency
+        latency:
+          threshold_ms: 1000
+
+      # ── Policy 3: Normal Traffic Sampling (10%) ─────────────────────────────
+      # Sample 10% of routine non-health-check traffic
+      - name: normal-traffic-filter
+        type: and
+        and:
+          and_sub_policy:
+            - name: exclude-health-routes
+              type: string_attribute
+              string_attribute:
+                key: http.target
+                values:
+                  - "/health"
+                  - "/metrics"
+                  - "/healthz"
+                invert_match: true
+            - name: normal-sample-rate
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 10.0
+
+      # ── Policy 4: Health-Check Sampling (1%) ────────────────────────────────
+      # Retain only ~1% of routine successful health checks (errors caught by Policy 1)
+      - name: health-check-filter
+        type: and
+        and:
+          and_sub_policy:
+            - name: match-health-routes
+              type: string_attribute
+              string_attribute:
+                key: http.target
+                values:
+                  - "/health"
+                  - "/metrics"
+                  - "/healthz"
+                invert_match: false
+            - name: health-sample-rate
+              type: probabilistic
+              probabilistic:
+                sampling_percentage: 1.0
+
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
 
 exporters:
   otlp/jaeger:
@@ -41,7 +112,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, tail_sampling, batch]
       exporters: [otlp/jaeger, debug]
     metrics:
       receivers: [otlp]
@@ -54,3 +125,5 @@ service:
   telemetry:
     logs:
       level: info
+    metrics:
+      address: 0.0.0.0:8888

@@ -3,7 +3,9 @@ import axios from 'axios'
 
 const API_BASE = import.meta.env.VITE_API_GATEWAY_URL || 'http://localhost:8000'
 const JAEGER_URL = import.meta.env.VITE_JAEGER_URL || 'http://localhost:16686'
-const PROMETHEUS_URL = import.meta.env.VITE_PROMETHEUS_URL || 'http://localhost:9090'
+
+const PROMETHEUS_API = '/prometheus'
+const JAEGER_API = '/jaeger'
 
 export const api = axios.create({ baseURL: API_BASE, timeout: 10000 })
 
@@ -15,7 +17,10 @@ export function useServicesHealth() {
   const fetch = useCallback(async () => {
     try {
       const res = await api.get('/api/services/health')
-      setData(res.data)
+      // also check api-gateway itself
+      let gatewayStatus = 'healthy'
+      try { await api.get('/health') } catch { gatewayStatus = 'unreachable' }
+      setData({ 'api-gateway': { status: gatewayStatus, code: 200 }, ...res.data })
       setError(null)
     } catch (e) {
       setError(e.message)
@@ -40,10 +45,7 @@ export function usePrometheusQuery(query, refreshMs = 15000) {
 
   const fetch = useCallback(async () => {
     try {
-      const res = await axios.get(`${PROMETHEUS_URL}/api/v1/query`, {
-        params: { query },
-        timeout: 10000
-      })
+      const res = await axios.get(`${PROMETHEUS_API}/api/v1/query`, { params: { query }, timeout: 10000 })
       setData(res.data)
       setError(null)
     } catch (e) {
@@ -73,7 +75,7 @@ export function usePrometheusRangeQuery(query, duration = '1h', step = '60s', re
     try {
       const end = Math.floor(Date.now() / 1000)
       const start = end - parseDuration(duration)
-      const res = await axios.get(`${PROMETHEUS_URL}/api/v1/query_range`, {
+      const res = await axios.get(`${PROMETHEUS_API}/api/v1/query_range`, {
         params: { query, start, end, step },
         timeout: 15000
       })
@@ -112,7 +114,16 @@ export async function fetchJaegerTraces(service, limit = 20) {
     })
     return res.data?.data || []
   } catch (e) {
-    return []
+    // fallback to proxied path
+    try {
+      const res = await axios.get(`/jaeger/api/traces`, {
+        params: { service, limit, lookback: '1h' },
+        timeout: 10000
+      })
+      return res.data?.data || []
+    } catch {
+      return []
+    }
   }
 }
 
@@ -121,8 +132,13 @@ export async function fetchJaegerServices() {
     const res = await axios.get(`${JAEGER_URL}/api/services`, { timeout: 5000 })
     return res.data?.data || []
   } catch (e) {
-    return []
+    try {
+      const res = await axios.get(`/jaeger/api/services`, { timeout: 5000 })
+      return res.data?.data || []
+    } catch {
+      return []
+    }
   }
 }
 
-export { JAEGER_URL, PROMETHEUS_URL }
+export { JAEGER_URL }

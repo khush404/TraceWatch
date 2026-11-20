@@ -109,8 +109,9 @@ async def process_payment(request: PaymentRequest):
             should_fail = request.simulate_failure or _simulate_failure or (random.random() < FAILURE_RATE)
             
             if should_fail:
-                span.set_status(trace.StatusCode.ERROR, "Payment processing failed")
+                span.set_status(trace.StatusCode.ERROR, "Payment processing failed – simulated failure")
                 span.set_attribute("payment.failed", True)
+                span.set_attribute("error", True)
                 PAYMENT_FAILURES.labels(reason="simulated_failure" if (request.simulate_failure or _simulate_failure) else "random_failure").inc()
                 PAYMENT_REQUESTS.labels(status="failed").inc()
                 payment = {
@@ -118,11 +119,11 @@ async def process_payment(request: PaymentRequest):
                     "order_id": request.order_id,
                     "amount": request.amount,
                     "status": "failed",
-                    "error": "Payment processing failed",
+                    "error": "Payment processing failed – simulated failure",
                     "timestamp": time.time()
                 }
                 payments_db[payment_id] = payment
-                raise HTTPException(status_code=402, detail="Payment processing failed")
+                raise HTTPException(status_code=500, detail="Payment Service Failed – HTTP 500. Trace captured successfully.")
             
             # Simulate processing time
             processing_time = random.uniform(0.05, 0.3)

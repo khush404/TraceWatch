@@ -2,9 +2,7 @@ import React from 'react'
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from 'recharts'
-import {
-  Activity, AlertTriangle, CheckCircle, Clock, Server, TrendingUp, Zap, Shield
-} from 'lucide-react'
+import { Activity, AlertTriangle, Clock, Server } from 'lucide-react'
 import StatCard from '../components/StatCard'
 import ServiceBadge from '../components/ServiceBadge'
 import PageHeader from '../components/PageHeader'
@@ -17,47 +15,27 @@ function formatTimestamp(ts) {
 
 function transformRangeData(result, labelKey) {
   if (!result?.data?.result?.length) return []
-  const series = result.data.result
   const allPoints = {}
-  series.forEach((s, i) => {
+  result.data.result.forEach((s, i) => {
     const label = s.metric[labelKey] || `series-${i}`
     s.values.forEach(([ts, val]) => {
       if (!allPoints[ts]) allPoints[ts] = { time: formatTimestamp(ts) }
-      allPoints[ts][label] = parseFloat(val).toFixed(3)
+      allPoints[ts][label] = parseFloat(val)
     })
   })
-  return Object.values(allPoints).slice(-30)
+  const points = Object.values(allPoints).slice(-30)
+  // drop series that are all zero (nothing to show)
+  if (points.length > 0) {
+    const keys = Object.keys(points[0]).filter(k => k !== 'time')
+    const hasNonZero = keys.some(k => points.some(p => p[k] > 0))
+    if (!hasNonZero) return []
+  }
+  return points
 }
 
-const CHART_COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#8b5cf6']
+const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#8b5cf6']
 
-export default function Dashboard() {
-  const { data: healthData, loading: healthLoading } = useServicesHealth()
-
-  // Prometheus instant queries
-  const { data: totalReq } = usePrometheusQuery('sum(increase(api_gateway_requests_total[1h])) or vector(0)')
-  const { data: errorCount } = usePrometheusQuery('sum(increase(api_gateway_errors_total[1h])) or vector(0)')
-  const { data: avgLatency } = usePrometheusQuery('avg(rate(api_gateway_request_duration_seconds_sum[5m]) / rate(api_gateway_request_duration_seconds_count[5m])) or vector(0)')
-
-  // Range queries for charts
-  const { data: reqRate } = usePrometheusRangeQuery('sum(rate(api_gateway_requests_total[2m])) by (service)', '1h', '60s')
-  const { data: latencyRate } = usePrometheusRangeQuery('histogram_quantile(0.95, sum(rate(api_gateway_request_duration_seconds_bucket[2m])) by (le, service))', '1h', '60s')
-
-  const reqChartData = transformRangeData(reqRate, 'service')
-  const latencyChartData = transformRangeData(latencyRate, 'service')
-
-  const getMetricValue = (data, decimals = 0) => {
-    const val = data?.data?.result?.[0]?.value?.[1]
-    if (val === undefined || val === null) return '—'
-    const num = parseFloat(val)
-    return isNaN(num) ? '—' : decimals > 0 ? num.toFixed(decimals) : Math.round(num).toString()
-  }
-
-  const services = healthData
-    ? Object.entries(healthData).map(([name, info]) => ({ name, ...info }))
-    : []
-  const healthyCount = services.filter(s => s.status === 'healthy').length
-
+function MetricChart({ title, data, gradientPrefix, emptyMsg }) {
   const CustomTooltip = ({ active, payload, label }) => {
     if (!active || !payload?.length) return null
     return (
@@ -75,6 +53,67 @@ export default function Dashboard() {
   }
 
   return (
+    <div className="bg-bg-card border border-bg-border rounded-xl p-5">
+      <h3 className="text-sm font-semibold text-text-primary mb-4">{title}</h3>
+      {data.length === 0 ? (
+        <div className="flex items-center justify-center h-[200px] text-text-muted text-xs">{emptyMsg}</div>
+      ) : (
+        <ResponsiveContainer width="100%" height={200}>
+          <AreaChart data={data}>
+            <defs>
+              {COLORS.map((color, i) => (
+                <linearGradient key={i} id={`${gradientPrefix}${i}`} x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor={color} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={color} stopOpacity={0} />
+                </linearGradient>
+              ))}
+            </defs>
+            <CartesianGrid strokeDasharray="3 3" stroke="#2d3250" />
+            <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} />
+            <YAxis tick={{ fill: '#64748b', fontSize: 10 }} />
+            <Tooltip content={<CustomTooltip />} />
+            <Legend wrapperStyle={{ fontSize: '11px', color: '#94a3b8' }} />
+            {Object.keys(data[0]).filter(k => k !== 'time').map((key, i) => (
+              <Area key={key} type="monotone" dataKey={key}
+                stroke={COLORS[i % COLORS.length]}
+                fill={`url(#${gradientPrefix}${i})`}
+                strokeWidth={2}
+              />
+            ))}
+          </AreaChart>
+        </ResponsiveContainer>
+      )}
+    </div>
+  )
+}
+
+export default function Dashboard() {
+  const { data: healthData, loading: healthLoading } = useServicesHealth()
+
+  const { data: totalReq }   = usePrometheusQuery('sum(increase(api_gateway_requests_total[1h])) or vector(0)')
+  const { data: errorCount } = usePrometheusQuery('sum(increase(payment_failures_total[1h])) or vector(0)')
+  const { data: avgLatency } = usePrometheusQuery('sum(rate(api_gateway_request_duration_seconds_sum[5m])) / sum(rate(api_gateway_request_duration_seconds_count[5m]))')
+
+  const { data: reqRate }   = usePrometheusRangeQuery('sum(rate(order_requests_total[5m])) by (status)', '1h', '60s')
+  const { data: errorRate } = usePrometheusRangeQuery('sum(rate(payment_failures_total[5m])) by (job)', '1h', '60s')
+
+  const reqChartData   = transformRangeData(reqRate, 'status')
+  const errorChartData = transformRangeData(errorRate, 'job')
+
+  const getMetricValue = (data, decimals = 0) => {
+    const val = data?.data?.result?.[0]?.value?.[1]
+    if (val == null) return '—'
+    const num = parseFloat(val)
+    if (isNaN(num)) return '—'
+    return decimals > 0 ? num.toFixed(decimals) : Math.round(num).toString()
+  }
+
+  const services = healthData
+    ? Object.entries(healthData).map(([name, info]) => ({ name, ...info }))
+    : []
+  const healthyCount = services.filter(s => s.status === 'healthy').length
+
+  return (
     <div className="p-6">
       <PageHeader
         title="System Overview"
@@ -87,108 +126,28 @@ export default function Dashboard() {
         }
       />
 
-      {/* Stat Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <StatCard
-          title="Total Requests (1h)"
-          value={getMetricValue(totalReq)}
-          icon={Activity}
-          color="primary"
-          subtitle="API Gateway"
-        />
-        <StatCard
-          title="Avg Latency"
-          value={getMetricValue(avgLatency, 3)}
-          unit="s"
-          icon={Clock}
-          color="info"
-          subtitle="p95 response time"
-        />
-        <StatCard
-          title="Error Count (1h)"
-          value={getMetricValue(errorCount)}
-          icon={AlertTriangle}
-          color="error"
-          subtitle="Gateway errors"
-        />
-        <StatCard
-          title="Active Services"
-          value={healthyCount}
-          unit={`/ ${services.length || 4}`}
-          icon={Server}
-          color="success"
-          subtitle="Healthy microservices"
-        />
+        <StatCard title="Total Requests (1h)" value={getMetricValue(totalReq)} icon={Activity} color="primary" subtitle="API Gateway" />
+        <StatCard title="Avg Latency" value={getMetricValue(avgLatency, 3)} unit="s" icon={Clock} color="info" subtitle="Gateway response time" />
+        <StatCard title="Failed Payments (1h)" value={getMetricValue(errorCount)} icon={AlertTriangle} color="error" subtitle="Payment failures" />
+        <StatCard title="Active Services" value={healthyCount} unit={`/ ${services.length || 5}`} icon={Server} color="success" subtitle="Healthy microservices" />
       </div>
 
-      {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-        {/* Request Rate Chart */}
-        <div className="bg-bg-card border border-bg-border rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-text-primary mb-4">Request Rate (req/s)</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={reqChartData}>
-              <defs>
-                {CHART_COLORS.map((color, i) => (
-                  <linearGradient key={i} id={`grad${i}`} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={color} stopOpacity={0.3} />
-                    <stop offset="95%" stopColor={color} stopOpacity={0} />
-                  </linearGradient>
-                ))}
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2d3250" />
-              <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} />
-              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} />
-              <Tooltip content={<CustomTooltip />} />
-              <Legend wrapperStyle={{ fontSize: '11px', color: '#94a3b8' }} />
-              {reqChartData.length > 0 && Object.keys(reqChartData[0]).filter(k => k !== 'time').map((key, i) => (
-                <Area
-                  key={key}
-                  type="monotone"
-                  dataKey={key}
-                  stroke={CHART_COLORS[i % CHART_COLORS.length]}
-                  fill={`url(#grad${i})`}
-                  strokeWidth={2}
-                />
-              ))}
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
-
-        {/* Latency Chart */}
-        <div className="bg-bg-card border border-bg-border rounded-xl p-5">
-          <h3 className="text-sm font-semibold text-text-primary mb-4">Response Latency p95 (seconds)</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={latencyChartData}>
-              <defs>
-                {CHART_COLORS.map((color, i) => (
-                  <linearGradient key={i} id={`latGrad${i}`} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={color} stopOpacity={0.2} />
-                    <stop offset="95%" stopColor={color} stopOpacity={0} />
-                  </linearGradient>
-                ))}
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#2d3250" />
-              <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} />
-              <YAxis tick={{ fill: '#64748b', fontSize: 10 }} />
-              <Tooltip content={<CustomTooltip />} />
-              <Legend wrapperStyle={{ fontSize: '11px', color: '#94a3b8' }} />
-              {latencyChartData.length > 0 && Object.keys(latencyChartData[0]).filter(k => k !== 'time').map((key, i) => (
-                <Area
-                  key={key}
-                  type="monotone"
-                  dataKey={key}
-                  stroke={CHART_COLORS[i % CHART_COLORS.length]}
-                  fill={`url(#latGrad${i})`}
-                  strokeWidth={2}
-                />
-              ))}
-            </AreaChart>
-          </ResponsiveContainer>
-        </div>
+        <MetricChart
+          title="Order Requests by Status (req/s)"
+          data={reqChartData}
+          gradientPrefix="req"
+          emptyMsg="No data yet — run an order flow from the Simulate page"
+        />
+        <MetricChart
+          title="Error Rate by Service (errors/s)"
+          data={errorChartData}
+          gradientPrefix="err"
+          emptyMsg="No errors recorded yet — run Scenario B from the Simulate page"
+        />
       </div>
 
-      {/* Services Health */}
       <div className="bg-bg-card border border-bg-border rounded-xl p-5">
         <h3 className="text-sm font-semibold text-text-primary mb-4">Service Health Status</h3>
         {healthLoading ? (
@@ -207,9 +166,7 @@ export default function Dashboard() {
                   <span className="text-sm font-medium text-text-primary">{svc.name}</span>
                   <ServiceBadge status={svc.status} />
                 </div>
-                {svc.error && (
-                  <p className="text-xs text-status-error truncate" title={svc.error}>{svc.error}</p>
-                )}
+                {svc.error && <p className="text-xs text-status-error truncate" title={svc.error}>{svc.error}</p>}
               </div>
             ))}
           </div>

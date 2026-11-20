@@ -4,7 +4,7 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts'
 import PageHeader from '../components/PageHeader'
-import { usePrometheusRangeQuery, PROMETHEUS_URL } from '../hooks/useApi'
+import { usePrometheusRangeQuery } from '../hooks/useApi'
 
 const COLORS = ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#3b82f6']
 
@@ -72,7 +72,7 @@ export default function Metrics() {
         subtitle="Real-time metrics from Prometheus"
         action={
           <a
-            href={PROMETHEUS_URL}
+            href="http://localhost:9090"
             target="_blank"
             rel="noopener noreferrer"
             className="px-3 py-2 bg-status-error/10 border border-status-error/30 rounded-lg text-sm text-status-error hover:bg-status-error/20 transition-all"
